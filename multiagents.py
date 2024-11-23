@@ -1,247 +1,176 @@
+
 import asyncio
 import logging
 import os
-import json
-import re
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from langgraph.graph import StateGraph, START, END
-from langchain.prompts import ChatPromptTemplate
-from concurrent.futures import ThreadPoolExecutor
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
-
-# Set OpenAI API Key - IMPORTANT: Replace with your actual key or use environment variable
-os.environ["OPENAI_API_KEY"] = "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"
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.chat_history import InMemoryChatMessageHistory
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Set OpenAI API Key
+os.environ["OPENAI_API_KEY"] = "Enter-OpenAI-Key"
 
 # Data Models
 class AgentPlan(BaseModel):
     """Represents a plan from an individual agent"""
     agent_id: str
     steps: List[Dict[str, Any]]
+    confidence_score: Optional[float] = None
 
 class PlanningState(BaseModel):
     """State for the multi-agent planning process"""
     user_input: str
-    num_agents: int = 3
+    num_agents: int = 5
     agent_plans: List[AgentPlan] = []
     evaluated_plan: Optional[AgentPlan] = None
     final_plan: Optional[Dict[str, Any]] = None
 
+class RequirementsCollector:
+    def __init__(self, llm_model: str = "gpt-4o-mini"):
+        self.llm = ChatOpenAI(model=llm_model, temperature=0.2)
+        self.template = ChatPromptTemplate.from_messages([
+            ("system", """
+            You are a data collection agent. Your task is to gather detailed information from users about their task requirements. Ask relevant questions that would be required for planning according to their usecase:
+
+            1. What task does the user want you to plan for
+            2. Timeline and Deadlines
+            3. Resources Required
+            4. Constraints and Limitations
+            5. Risk Factors to be considered 
+            6. Feasibility 
+            7. Any other details related to the context
+
+
+            Continue asking questions until you have comprehensive information. Once all necessary details are collected, end with 'REQUIREMENTS GATHERED'.
+            """),
+            MessagesPlaceholder(variable_name="history"),
+            ("human", "{input}")
+        ])
+
+    async def collect_requirements(self) -> str:
+        store = {}
+        session_id = "requirements_session"
+        
+        chain = self.template | self.llm
+        runnable = RunnableWithMessageHistory(
+            runnable=chain,
+            get_session_history=lambda: self._get_session_history(session_id, store),
+            input_messages_key="input",
+            history_messages_key="history"
+        )
+
+        collected_info = []
+        print("🤖 Requirements Collector: Hello! I'll help gather requirements for your task. What would you like to plan?")
+        
+        while True:
+            user_input = input()
+            response = await runnable.ainvoke({"input": user_input})
+            print(f"🤖 Requirements Collector: {response.content}")
+            collected_info.append(response.content)
+            
+            if "REQUIREMENTS GATHERED" in response.content:
+                return "\n".join(collected_info)
+
+    def _get_session_history(self, session_id: str, store):
+        if session_id not in store:
+            store[session_id] = InMemoryChatMessageHistory()
+        return store[session_id]
+
 class MultiAgentPlanner:
-    def __init__(self, 
-                 llm_model: str = "gpt-4o-mini", 
-                 max_workers: int = 3):
-        """
-        Initialize MultiAgentPlanner with configurable LLM and concurrency
-        
-        Args:
-            llm_model (str): Language model to use for planning
-            max_workers (int): Maximum number of concurrent agent threads
-        """
+    def __init__(self, llm_model: str = "gpt-4o-mini"):
         self.llm = ChatOpenAI(model=llm_model, temperature=0.7)
-        self.thread_executor = ThreadPoolExecutor(max_workers=max_workers)
+        self.requirements_collector = RequirementsCollector(llm_model)
 
-    
-    async def generate_prompt_for_agents(self, user_input: str) -> str:
-        """
-        Generate a comprehensive prompt for planning agents
-        
-        Args:
-            user_input (str): Original user input
-        
-        Returns:
-            str: Structured prompt for agents
-        """
-        prompt_generation_agent = (
-            f"You are the Prompt Generation Agent. Analyze the user input below and generate a detailed and comprehensive "
-            f"prompt for planning agents that will help them break down the task into actionable steps.\n\n"
-            f"User Input: {user_input}\n\n"
-            f"Consider the following in the generated prompt:\n"
-            f"1. Key objectives of the task\n"
-            f"2. Potential challenges and how to overcome them\n"
-            f"3. Resources that might be needed\n"
-            f"4. Actionable and sequential steps to achieve the task\n"
-            f"5. Optimization and efficiency considerations\n"
-            f"6. Any risks or dependencies that should be considered"
-        )
-        
-        # Invoke LLM to generate the prompt
-        prompt_response = await self.llm.ainvoke(prompt_generation_agent)
-        
-        # Print the generated prompt
-        print(f"Prompt Generation Agent Output: {prompt_response.content}")
-        
-        return prompt_response.content
-    
-    def _parse_plan_response(self, response) -> List[Dict[str, Any]]:
-        """
-        Parse LLM response directly, attempting to extract structured plan steps
-        
-        Args:
-            response: LLM plan response
-        
-        Returns:
-            List of step dictionaries extracted from the LLM response
-        """
-        try:
-            response_content = response.content if hasattr( response, 'content') else str(response)
-            
-            # Try to extract JSON if the response contains a JSON-like structure
-            json_match = re.search(r'\{.*\}', response_content, re.DOTALL)
-            if json_match:
-                try:
-                    parsed_json = json.loads(json_match.group(0))
-                    if isinstance(parsed_json, list) or isinstance(parsed_json, dict):
-                        return [parsed_json] if isinstance(parsed_json, dict) else parsed_json
-                except json.JSONDecodeError:
-                    pass
-
-            steps = []
-            raw_steps = re.split(r'\n(?=\d+\.|\•|\-)', response_content)
-            
-            for idx, step_text in enumerate(raw_steps, 1):
-                cleaned_step = step_text.strip()
-                if cleaned_step:
-                    steps.append({
-                        "step": idx,
-                        "action": cleaned_step.split('.')[0] if '.' in cleaned_step else cleaned_step,
-                        "description": cleaned_step
-                    })
-            
-            return steps
-        except Exception as e:
-            logger.error(f"Error parsing plan response: {e}")
-            return [{"step": 1, "action": "Generated Plan", "description": response_content}]
-
-    async def generate_agent_plan(self, agent_id: str, prompt: str) -> AgentPlan:
-        """
-        Generate a plan for a specific agent
-        
-        Args:
-            agent_id (str): Unique identifier for the agent
-            prompt (str): Comprehensive planning prompt
-        
-        Returns:
-            AgentPlan: Detailed plan with confidence score
-        """
-        try:
-            agent_specific_prompt = (
-                f"You are Agent {agent_id}. Develop a comprehensive, detailed plan "
-                f"for the following task: {prompt}\n\n"
-                "Provide your plan with clear, actionable steps. "
-                "Include specific details, potential challenges, "
-                "and the reasoning behind each step."
-            )
-            
-            plan_response = await self.llm.ainvoke(agent_specific_prompt)
-            
-            # Print agent plan response
-            print(f"Agent {agent_id} Plan Output: {plan_response.content}")
-            
-            steps = self._parse_plan_response(plan_response)
-            
-            return AgentPlan(
-                agent_id=agent_id,
-                steps=steps
-            )
-        except Exception as e:
-            logger.error(f"Error in agent {agent_id} planning: {e}")
-            return AgentPlan(agent_id=agent_id, steps=[])
-
-    async def calculate_confidence_score(self, plan: AgentPlan) -> float:
-        """
-        Calculate confidence score based on completeness, reliability, and value of the plan
-        
-        Args:
-            plan (AgentPlan): The generated plan
-        
-        Returns:
-            float: Confidence score based on evaluation of the plan
-        """
-        evaluation_prompt = (
-            f"Please evaluate the following plan based on its completeness, reliability, and the value of the information it holds. "
-            "Provide a confidence score from 0 to 1, where 0 is the lowest and 1 is the highest. "
-            "Also, provide reasoning for your score.\n\n"
-            f"Plan {plan.agent_id}:\n" + "\n".join([f"Step {step['step']}: {step['action']} - {step['description']}" for step in plan.steps])
-        )
-        
-        eval_response = await self.llm.ainvoke(evaluation_prompt)
-        
-        print(f"Evaluation Response: {eval_response.content}")
-        
-        # Extract the confidence score and reason from the model's response
-        match = re.search(r"\*\*Confidence Score:\*\*\s*(\d+\.\d+)", eval_response.content)
-        if match:
-            confidence_score = float(match.group(1))
-            reason = re.search(r"Reasoning: (.*)", eval_response.content)
-            reason_text = reason.group(1) if reason else "No reasoning provided."
-            print("------////////--------", reason_text)
-            return confidence_score, reason_text
-        
-        return 0.5, "No clear evaluation provided."
-
-    async def evaluate_plans(self, plans: List[AgentPlan]) -> AgentPlan:
-        """
-        Evaluate and select the best plan using LLM
-        
-        Args:
-            plans (List[AgentPlan]): Generated agent plans
-        
-        Returns:
-            AgentPlan: Selected best plan
-        """
-        plans_text = "\n\n".join([f"Plan {plan.agent_id}:\n" + "\n".join([f"Step {step['step']}: {step['action']} - {step['description']}" for step in plan.steps])
-            for plan in plans
+    async def generate_prompt_for_agents(self, requirements: str) -> str:
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """
+            You are the Prompt Generation Agent. Create a comprehensive prompt for planning agents based on the collected requirements.
+            Structure the prompt to help agents create detailed, actionable plans that address all aspects of the project.You are guiding me for planning trips.
+            """),
+            ("human", f"Requirements:\n{requirements}")
         ])
         
-        evaluation_prompt = (
-            "Here are the plans for the following task. Please evaluate each plan based on completeness, reliability, and value, "
-            "and give a confidence score from 0 to 1. Also, provide reasoning for each score:\n\n"
-            f"{plans_text}\n\n"
-            "After scoring, please choose the best plan based on the highest confidence score, and explain why it is the best."
+        chain = prompt | self.llm
+        response = await chain.ainvoke({})
+        print(f"📝 Prompt Generator: Generated planning prompt based on requirements")
+        return response.content
+
+    async def generate_agent_plan(self, agent_id: str, prompt: str) -> AgentPlan:
+        agent_prompt = ChatPromptTemplate.from_messages([
+            ("system", f"""
+            You are Planning {agent_id}. Create a detailed, step-by-step plan based on the following prompt.
+            Include specific actions, timelines, dependencies, and expected outcomes for each step.
+            Structure your response as a series of clear, actionable steps.
+            """),
+            ("human", prompt)
+        ])
+        
+        chain = agent_prompt | self.llm
+        response = await chain.ainvoke({})
+        
+        plan = AgentPlan(
+            agent_id=agent_id,
+            steps=[{"step": i+1, "description": step.strip()} 
+                   for i, step in enumerate(response.content.split("\n")) 
+                   if step.strip()]
         )
         
-        eval_response = await self.llm.ainvoke(evaluation_prompt)
+        print(f"\n🤔 {agent_id} Proposal:")
+        for step in plan.steps:
+            print(f"   Step {step['step']}: {step['description']}")
+        print()
         
-        print(f"Evaluation Response: {eval_response.content}")
-        
-        best_plan_id = re.search(r"Plan (\w+)", eval_response.content)
-        if best_plan_id:
-            best_plan_id = best_plan_id.group(1)
-            best_plan = next((plan for plan in plans if plan.agent_id == best_plan_id), None)
+        return plan
+
+    async def evaluate_plans(self, plans: List[AgentPlan]) -> AgentPlan:
+        evaluation_prompt = ChatPromptTemplate.from_messages([
+            ("system", """
+            You are the Evaluation Agent. Review the provided plans and:
+            1. Assign a confidence score (0-1) to each plan
+            2. Select the best plan based on comprehensiveness, feasibility, and alignment with requirements
+            3. Provide reasoning for your selection
             
-            # Print the selected plan without the confidence score
-            print("\n--- Selected Plan ---")
-            for step in best_plan.steps:
-                print(f"Step {step['step']}: {step['action']}")
-                print(f"Description: {step['description']}\n")
-            
-            return best_plan
+            Format your response as:
+            SELECTED_PLAN: [Agent ID]
+            CONFIDENCE_SCORE: [Score]
+            REASONING: [Your detailed explanation]
+            """),
+            ("human", "\n\n".join([
+                f"Plan {plan.agent_id}:\n" + 
+                "\n".join([f"Step {step['step']}: {step['description']}" 
+                          for step in plan.steps])
+                for plan in plans
+            ]))
+        ])
         
-        return None
-    
+        chain = evaluation_prompt | self.llm
+        response = await chain.ainvoke({})
+        print(f"\n⚖️ Evaluation Agent:\n{response.content}\n")
+        
+        selected_plan = next(
+            plan for plan in plans 
+            if plan.agent_id in response.content.split("SELECTED_PLAN:")[1].split("\n")[0]
+        )
+        selected_plan.confidence_score = float(
+            response.content.split("CONFIDENCE_SCORE:")[1].split("\n")[0]
+        )
+        
+        return selected_plan
+
     async def create_planning_graph(self, final_plan: AgentPlan):
-        """
-        Create a LangGraph StateGraph from the final plan
-        
-        Args:
-            final_plan (AgentPlan): Selected plan to convert to graph
-        
-        Returns:
-            Compiled LangGraph
-        """
         graph = StateGraph(dict)
         
-        # Add nodes for each step
         for step in final_plan.steps:
             graph.add_node(str(step['step']), 
-                           lambda state, step=step: self._execute_step(state, step))
+                          lambda state, step=step: self._execute_step(state, step))
         
-        # Add edges between steps (simple linear for now)
         steps = final_plan.steps
         for i in range(len(steps) - 1):
             graph.add_edge(str(steps[i]['step']), str(steps[i+1]['step']))
@@ -250,66 +179,36 @@ class MultiAgentPlanner:
         graph.add_edge(str(steps[-1]['step']), END)
         
         return graph.compile()
-    
+
     def _execute_step(self, state: Dict, step: Dict[str, Any]) -> Dict:
-        """
-        Execute an individual step in the plan
-        
-        Args:
-            state (Dict): Current graph state
-            step (Dict): Step to execute
-        
-        Returns:
-            Updated state
-        """
-        logger.info(f"Executing step: {step.get('action', 'Unnamed Step')}")
-        logger.info(f"Step Description: {step.get('description', 'No description')}")
+        logger.info(f"Executing step {step['step']}: {step['description']}")
         return state
-    
-    async def main(self, user_input: str):
-        """
-        Main orchestration method for multi-agent planning
+
+    async def main(self):
+        # Collect requirements
+        requirements = await self.requirements_collector.collect_requirements()
         
-        Args:
-            user_input (str): User's original input
-        """
-        # Generate comprehensive prompt using the prompt generation agent
-        prompt = await self.generate_prompt_for_agents(user_input)
+        # Generate prompt for planning agents
+        planning_prompt = await self.generate_prompt_for_agents(requirements)
         
-        # Generate plans concurrently for planning agents
-        agent_plans = await asyncio.gather(
-            *[self.generate_agent_plan(f"Agent_{i}", prompt) 
-              for i in range(3)]  # Dynamic agent count
-        )
+        # Generate plans from multiple agents
+        agent_plans = await asyncio.gather(*[
+            self.generate_agent_plan(f"Agent_{i}", planning_prompt)
+            for i in range(5)
+        ])
         
-        # Calculate confidence score for each agent plan and store reasoning
-        for plan in agent_plans:
-            plan.confidence_score, reason = await self.calculate_confidence_score(plan)
-            print(f"Agent {plan.agent_id} Confidence Score: {plan.confidence_score}")
-            print(f"Reasoning: {reason}")
-        
-        # Evaluate and select the best plan using LLM
+        # Evaluate and select best plan
         best_plan = await self.evaluate_plans(agent_plans)
         
-        # Print the selected plan
-        print("\n--- Selected Plan ---")
+        print("\n🏆 === Selected Plan ===")
+        print(f"Agent: {best_plan.agent_id}")
+        print(f"Confidence Score: {best_plan.confidence_score}\n")
         for step in best_plan.steps:
-            print(f"Step {step['step']}: {step['action']}")
-            print(f"Description: {step['description']}\n")
+            print(f"Step {step['step']}: {step['description']}")
 
-# Example usage
-async def run_multi_agent_planner():
+async def run_planner():
     planner = MultiAgentPlanner()
-    
-    # Get user input
-    user_input = input("Enter your task: ")
-    
-    try:
-        # Run the multi-agent planner
-        await planner.main(user_input)
-    
-    except Exception as e:
-        print(f"An error occurred: {e}")
+    await planner.main()
 
 if __name__ == "__main__":
-    asyncio.run(run_multi_agent_planner())
+    asyncio.run(run_planner())
