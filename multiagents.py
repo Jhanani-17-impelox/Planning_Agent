@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 import os
@@ -27,7 +26,7 @@ class AgentPlan(BaseModel):
 class PlanningState(BaseModel):
     """State for the multi-agent planning process"""
     user_input: str
-    num_agents: int = 5
+    num_agents: int = 3
     agent_plans: List[AgentPlan] = []
     evaluated_plan: Optional[AgentPlan] = None
     final_plan: Optional[Dict[str, Any]] = None
@@ -85,7 +84,7 @@ class RequirementsCollector:
 
 class MultiAgentPlanner:
     def __init__(self, llm_model: str = "gpt-4o-mini"):
-        self.llm = ChatOpenAI(model=llm_model, temperature=0.7)
+        self.llm = ChatOpenAI(model=llm_model, temperature=0.3)
         self.requirements_collector = RequirementsCollector(llm_model)
 
     async def generate_prompt_for_agents(self, requirements: str) -> str:
@@ -194,7 +193,7 @@ class MultiAgentPlanner:
         # Generate plans from multiple agents
         agent_plans = await asyncio.gather(*[
             self.generate_agent_plan(f"Agent_{i}", planning_prompt)
-            for i in range(5)
+            for i in range(3)
         ])
         
         # Evaluate and select best plan
