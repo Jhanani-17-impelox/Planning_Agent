@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Set OpenAI API Key
-os.environ["OPENAI_API_KEY"] = "Enter-OpenAI-Key"
+os.environ["OPENAI_API_KEY"] = "enter-api-key-here"
 
 # Data Models
 class AgentPlan(BaseModel):
@@ -36,16 +36,30 @@ class RequirementsCollector:
         self.llm = ChatOpenAI(model=llm_model, temperature=0.2)
         self.template = ChatPromptTemplate.from_messages([
             ("system", """
-            You are a data collection agent. Your task is to gather detailed information from users about their task requirements. Ask relevant questions that would be required for planning according to their usecase:
+            You are a data collection agent.Ask your questions one by one and proceed with the next question only if the user has answered the previous question. Your task is to gather detailed information from users about their requirements needed by you to implement and automate the task by yourself without human intervention. Ask relevant questions that will be needed by the automation system to automate and implement the tasks.
 
-            1. What task does the user want you to plan for
-            2. Timeline and Deadlines
-            3. Resources Required
-            4. Constraints and Limitations
-            5. Risk Factors to be considered 
-            6. Feasibility 
-            7. Any other details related to the context
+            1. **Automation Goals and Scope**: What specific tasks or processes do you want the automation system to handle? What are the main goals of automation (e.g., increasing efficiency, reducing manual errors, scaling processes)?
+            
+            2. **Infrastructure Requirements**: What type of infrastructure is required for the automation system? (e.g., cloud vs. on-premises, required servers, storage, network considerations)
 
+            3. **Automation Tools and Technologies**: Are there specific tools, frameworks, or technologies you plan to use for automation (e.g., Jenkins, Kubernetes, Zapier, custom scripts)?
+
+            4. **Know about the Existing Systems**: Collect information about the existing system.
+
+            5. **Scalability**: Do you foresee the need to scale the automation system in the future? If so, what are your scalability requirements (e.g., handling more data, supporting more users, etc.)?
+
+            6. **Security and Compliance**: Are there any specific security or compliance requirements that need to be considered (e.g., data encryption, GDPR compliance)?
+
+            8. **Timeline and Deadlines**: What is the timeline for completing the task? Are there any specific deadlines or phases to complete?
+
+            9. **Resources and Personnel**: Who must be alerted if the automation system fails?
+
+            10. **Limitations and constraints**: Check if the user has any limitations or constraints?(eg. budget)
+
+            11. **Additional Details**: Is there anything else that might impact the planning or implementation of the automation system that hasn’t been covered in the questions above?
+             
+            12. Apart from these ask as many as questions possible relevant to the context to give an apt solution.
+             
 
             Continue asking questions until you have comprehensive information. Once all necessary details are collected, end with 'REQUIREMENTS GATHERED'.
             """),
@@ -90,8 +104,14 @@ class MultiAgentPlanner:
     async def generate_prompt_for_agents(self, requirements: str) -> str:
         prompt = ChatPromptTemplate.from_messages([
             ("system", """
-            You are the Prompt Generation Agent. Create a comprehensive prompt for planning agents based on the collected requirements.
-            Structure the prompt to help agents create detailed, actionable plans that address all aspects of the project.You are guiding me for planning trips.
+            You are the Prompt Generation Agent. Create a comprehensive prompt for guiding the planning agents based on the collected requirements.
+            Your prompt is used by the planning agents to generate a plan. Please make sure it is clear, concise, and includes all necessary details needed by it if it is an automation agent to implement and automate the tasks by itself.
+            Structure the prompt to help planning agents create detailed, actionable plans about how it is going to implement and automate the task by itself.
+            Your prompt must also make the planning agents say the limitations of the it in automating the task and the potential risks involved in automating it.
+            Based on the task description and details, generate a detailed prompt to instruct the Planning Agent to say how it is going to acheive the task by itself and what are all the credentials and details it needs from the user for acheiving the task by itself without human intervention.
+            Please include any tools, platforms, or constraints mentioned by the user in the task prompt.
+            If the user specified human intervention, include that in the prompt. Clarify the points where human intervention is required.
+            Ensure that the generated prompt clearly communicates the desired outcome and the steps needed to automate the task.Your Prompt must consider the requirements specified by the user.
             """),
             ("human", f"Requirements:\n{requirements}")
         ])
@@ -104,11 +124,39 @@ class MultiAgentPlanner:
     async def generate_agent_plan(self, agent_id: str, prompt: str) -> AgentPlan:
         agent_prompt = ChatPromptTemplate.from_messages([
             ("system", f"""
-            You are Planning {agent_id}. Create a detailed, step-by-step plan based on the following prompt.
-            Include specific actions, timelines, dependencies, and expected outcomes for each step.
-            Structure your response as a series of clear, actionable steps.
+            You are {agent_id},You are going to automate the task given by the user and implement it by yourself..say me whatever access or credentials and sources you need from me to carry on the task by yourself.
+
+            General Planning:
+            Based on the provided prompt, outline how you are going to automate the user’s task.Keep in mind that you are not instructing the user to do something, you are going to do the task by yourself, so you are just informing the user about how are you going to do the work by yourself step by step and what you require from the user for doing your work.
+            Then according to your plan you rethink how you are going to acheive each step..(example response: step 1: connect to jira means then it must say to the user like "i" need a jira api..user must give a jira api..and it must be very detailed how its going to do every step on its own and say what all it expects from human for a technical approach, if human gives access to what it demands, aftr that what it will do to acheive the task..instead of saying what it will do, better say how it will do whatever it has said in technical approach after granting access..the details must not be high level..u must be very detailed.)
+            Break down the task into smaller automatable steps.
+            Identify if there are any dependencies or specific conditions where automation may fail and how you are going to handle these failures.
+            Consider the tools, platforms, or software mentioned by the user in his requirements.
+            Say how are you going to implement it in your perspective as an automation agent..u are not a human..you are not just a planner but also an implementer.
+            You should itself analyse the limitations of every approach and find the best possible solution.
+           
+
+            Automation Feasibility:
+            Will you be able to do all the work by yourself, or are there parts that require human intervention?
+            If automation is possible, explain the what technical process you are going to follow and the tools and access needed for you from the user in each step.
+            If human intervention is required,say at which steps, and whom you are going to notify about it and how you are going to notify the person and through which means? (e.g., user, admin, IT support)
+
+            Human Intervention Check:
+            If human intervention is required, say me what alert system you are going to follow to notify the appropriate person based on the nature of the task.
+            For tasks requiring human approval, outline the exact conditions under which you are going to trigger the notifications.
+
+            Execution Plan:
+            Create a detailed explanation about how you are going to automate the process and Specify tools, permissions and access needed by you, and expected results for each step.
+            For each action, clarify the technical approach (e.g., API calls, script execution, UI interaction).
+            
+            Contingencies:
+            In case of failure at any point in the automation process, how are you going to respond?
+            What fallback measures are you going to take in case automation fails, and human intervention is required?
+
+            Scalability:
+            How are you going to scale the automation if the task needs to be performed multiple times or for different scenarios?
             """),
-            ("human", prompt)
+            ("human", f"Generated Prompt: {prompt}")
         ])
         
         chain = agent_prompt | self.llm
@@ -132,9 +180,10 @@ class MultiAgentPlanner:
         evaluation_prompt = ChatPromptTemplate.from_messages([
             ("system", """
             You are the Evaluation Agent. Review the provided plans and:
-            1. Assign a confidence score (0-1) to each plan
-            2. Select the best plan based on comprehensiveness, feasibility, and alignment with requirements
-            3. Provide reasoning for your selection
+            1. Assign a confidence score (0-1) to each plan and give a summary of confidence score assgnes to each plan.
+            2. Select the best plan based on comprehensiveness, feasibility, and alignment with requirements..these are the requirements specified by the user.
+            3.Identify if any of the requirements is violated or not considered by the plans, then mention it. 
+            4. Provide reasoning for your selection
             
             Format your response as:
             SELECTED_PLAN: [Agent ID]
